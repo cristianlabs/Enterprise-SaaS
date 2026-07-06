@@ -1,0 +1,419 @@
+// ─── Nexus ERP — Schema Prisma ───────────────────────────────────────────────
+// Stack: Next.js 15 · TypeScript · Prisma v6 · PostgreSQL (Supabase)
+//
+// Conexão dual:
+//   DATABASE_URL  → Transaction Pooler (runtime) porta 6543
+//   DIRECT_URL    → Conexão direta (DDL/migrations) porta 5432
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  OWNER
+  ADMIN
+  MANAGER
+  SELLER
+  EMPLOYEE
+}
+
+enum CustomerStatus {
+  PROSPECT
+  ACTIVE
+  INACTIVE
+  CHURNED
+}
+
+enum DealStatus {
+  OPEN
+  WON
+  LOST
+  ON_HOLD
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  DELIVERED
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+// ─── Autenticação ─────────────────────────────────────────────────────────────
+
+model TwoFactorToken {
+  id        String   @id @default(cuid())
+  email     String
+  token     String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  role          Role      @default(EMPLOYEE)
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relações NextAuth
+  accounts Account[]
+  sessions Session[]
+
+  // Relações do sistema
+  dealsOwned      Deal[]
+  activitiesLog   Activity[]
+  tasksCreated    Task[]      @relation("TaskCreatedBy")
+  tasksAssigned   Task[]      @relation("TaskAssignedTo")
+  quotesCreated   Quote[]
+  ordersCreated   Order[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // ex: "CREATE", "UPDATE", "DELETE"
+  resource   String   // ex: "Customer", "Order"
+  resourceId String?
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([resource])
+  @@index([createdAt])
+}
+
+// ─── CRM ─────────────────────────────────────────────────────────────────────
+
+model Company {
+  id      String  @id @default(cuid())
+  name    String
+  cnpj    String? @unique
+  email   String?
+  phone   String?
+  city    String?
+  state   String?
+  website String?
+
+  customers Customer[]
+}
+
+model Customer {
+  id          String         @id @default(cuid())
+  name        String
+  email       String?
+  phone       String?
+  whatsapp    String?
+  document    String?        // CPF ou CNPJ
+  status      CustomerStatus @default(PROSPECT)
+  tags        String[]
+  notes       String?        @db.Text
+  companyId   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  company    Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  deals      Deal[]
+  activities Activity[]
+  quotes     Quote[]
+  orders     Order[]
+
+  @@index([status])
+  @@index([name])
+}
+
+model Pipeline {
+  id    String @id @default(cuid())
+  name  String
+  order Int    @default(0)
+  color String @default("#3b82f6")
+
+  deals Deal[]
+}
+
+model Deal {
+  id            String     @id @default(cuid())
+  title         String
+  value         Decimal?
+  status        DealStatus @default(OPEN)
+  priority      Priority   @default(MEDIUM)
+  pipelineId    String
+  customerId    String?
+  ownerId       String
+  expectedClose DateTime?
+  closedAt      DateTime?
+  notes         String?    @db.Text
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  pipeline   Pipeline   @relation(fields: [pipelineId], references: [id])
+  customer   Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  owner      User       @relation(fields: [ownerId], references: [id])
+  activities Activity[]
+  quotes     Quote[]
+
+  @@index([customerId])
+  @@index([ownerId])
+  @@index([pipelineId, status])
+}
+
+model Activity {
+  id         String       @id @default(cuid())
+  type       ActivityType
+  title      String
+  notes      String?      @db.Text
+  dueAt      DateTime?
+  doneAt     DateTime?
+  customerId String?
+  dealId     String?
+  userId     String
+  createdAt  DateTime     @default(now())
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  deal     Deal?     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id])
+
+  @@index([customerId])
+  @@index([dealId])
+}
+
+enum ActivityType {
+  NOTE
+  CALL
+  EMAIL
+  MEETING
+  WHATSAPP
+  TASK
+}
+
+// ─── Catálogo ─────────────────────────────────────────────────────────────────
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  createdAt   DateTime  @default(now())
+
+  products Product[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  sku         String   @unique
+  description String?  @db.Text
+  price       Decimal
+  cost        Decimal?
+  stock       Int      @default(0)
+  minStock    Int      @default(0)
+  active      Boolean  @default(true)
+  categoryId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  category   Category?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  quoteItems QuoteItem[]
+  orderItems OrderItem[]
+
+  @@index([active])
+  @@index([categoryId])
+}
+
+// ─── Vendas ──────────────────────────────────────────────────────────────────
+
+model Quote {
+  id          String      @id @default(cuid())
+  number      String      @unique // ex: COT-00001
+  status      QuoteStatus @default(DRAFT)
+  customerId  String?
+  dealId      String?
+  createdById String
+  validUntil  DateTime?
+  notes       String?     @db.Text
+  totalValue  Decimal     @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  customer  Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  deal      Deal?      @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  createdBy User       @relation(fields: [createdById], references: [id])
+  items     QuoteItem[]
+  order     Order?
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model QuoteItem {
+  id        String  @id @default(cuid())
+  quoteId   String
+  productId String
+  quantity  Int
+  unitPrice Decimal
+  discount  Decimal @default(0)
+  total     Decimal
+
+  quote   Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  number      String      @unique // ex: PV-00001
+  status      OrderStatus @default(PENDING)
+  customerId  String?
+  quoteId     String?     @unique
+  createdById String
+  notes       String?     @db.Text
+  totalValue  Decimal     @default(0)
+  deliveredAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  customer  Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  quote     Quote?      @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  createdBy User        @relation(fields: [createdById], references: [id])
+  items     OrderItem[]
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  unitPrice Decimal
+  discount  Decimal @default(0)
+  total     Decimal
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+// ─── Produtividade ────────────────────────────────────────────────────────────
+
+model Task {
+  id           String     @id @default(cuid())
+  title        String
+  description  String?    @db.Text
+  status       TaskStatus @default(TODO)
+  priority     Priority   @default(MEDIUM)
+  dueAt        DateTime?
+  createdById  String
+  assignedToId String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  createdBy  User  @relation("TaskCreatedBy", fields: [createdById], references: [id])
+  assignedTo User? @relation("TaskAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([assignedToId])
+  @@index([status])
+}
+
+// ─── Sistema ──────────────────────────────────────────────────────────────────
+
+model ModulePermission {
+  id        String   @id @default(cuid())
+  module    String   // ex: "customers", "products", "quotes"
+  role      Role
+  allowed   Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+
+  @@unique([module, role])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  link      String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+}
